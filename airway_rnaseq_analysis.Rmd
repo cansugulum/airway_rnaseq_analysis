@@ -1,0 +1,131 @@
+---
+title: "Airway RNA-seq Analysis Pipeline"
+author: "Cansu Gulum"
+output: 
+  html_document: 
+    theme: readable
+    toc: true
+    toc_float: true
+---
+
+# Airway RNA-seq Analysis
+
+This document performs a complete RNA-seq analysis using the **airway** dataset.
+
+---
+
+```{r, message=FALSE, warning=FALSE}
+library(DESeq2)
+library(tidyverse)
+library(ggplot2)
+library(airway)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+```{r, message=FALSE, warning=FALSE}
+data("airway")
+se <- airway
+dds <- DESeqDataSet(se, design = ~ dex)
+
+vsd <- vst(dds, blind = FALSE)
+expr_vst <- assay(vsd)
+
+expr_pca <- t(expr_vst)
+expr_scaled <- scale(expr_pca)
+
+vars <- apply(expr_scaled, 2, var, na.rm = TRUE)
+zero_or_na <- which(is.na(vars) | vars == 0)
+if(length(zero_or_na) > 0) expr_scaled <- expr_scaled[, -zero_or_na]
+
+meta_data <- as.data.frame(colData(dds))
+```
+
+# PCA Plot
+```{r, message=FALSE, warning=FALSE}
+pca_res <- prcomp(expr_scaled, center = TRUE, scale. = TRUE)
+pca_imp <- summary(pca_res)$importance
+pc1_var <- round(pca_imp["Proportion of Variance", 1] * 100, 1)
+pc2_var <- round(pca_imp["Proportion of Variance", 2] * 100, 1)
+
+pca_df <- data.frame(
+  PC1 = pca_res$x[, 1],
+  PC2 = pca_res$x[, 2],
+  group = meta_data$dex
+)
+
+ggplot(pca_df, aes(PC1, PC2, color = group)) +
+  geom_point(size = 3) +
+  theme_minimal() +
+  labs(
+    title = "PCA Plot: Dexamethasone vs Untreated",
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)")
+  )
+```
+
+# Volcano Plot
+```{r, message=FALSE, warning=FALSE, results='hide'}
+dds_analysis <- DESeq(dds)
+
+results_raw <- results(dds_analysis, contrast = c("dex", "trt", "untrt"))
+results_df <- as.data.frame(results_raw)
+
+significant_genes_df <- results_df %>%
+  filter(padj < 0.05 & abs(log2FoldChange) > 1.5)
+
+top_gene_names <- rownames(significant_genes_df)
+```
+
+```{r, message=FALSE, warning=FALSE}
+volcano_df <- results_df %>%
+  mutate(negLog10P = -log10(padj + 1e-100)) %>% 
+  mutate(Status = case_when(
+    padj < 0.05 & log2FoldChange >= 1.5 ~ "Up-regulated (Higher in Dexamethasone)",
+    padj < 0.05 & log2FoldChange <= -1.5 ~ "Down-regulated (Lower in Dexamethasone)",
+    TRUE ~ "Not Significant"
+  ))
+
+ggplot(volcano_df, aes(x = log2FoldChange, y = negLog10P, color = Status)) +
+  geom_point(alpha = 0.8, size = 1.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+  geom_vline(xintercept = c(-1.5, 1.5), linetype = "dashed", color = "black") +
+  scale_color_manual(values = c("Up-regulated (Higher in Dexamethasone)" = "red",
+                                "Down-regulated (Lower in Dexamethasone)" = "blue",
+                                "Not Significant" = "gray50")) +
+  labs(
+    title = "Volcano Plot: Dexamethasone Treatment Effect",
+    x = "Log2 Fold Change (Dexamethasone vs Control)",
+    y = "-log10(Adjusted P-Value)"
+  ) +
+  theme_minimal()
+```
+
+# Heatmap of Significant Genes
+```{r, message=FALSE, warning=FALSE}
+expr_heatmap <- t(expr_scaled[, top_gene_names])
+
+annotation_df <- meta_data[, "dex", drop = FALSE]
+ha <- HeatmapAnnotation(
+  df = annotation_df,
+  col = list(dex = c("trt" = "red", "untrt" = "blue")),
+  which = "column",
+  name = "Treatment Status"
+)
+
+col_fun <- colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+
+ht <- Heatmap(
+  expr_heatmap,
+  name = "Expression (Z-score)",
+  top_annotation = ha,
+  col = col_fun,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  column_title = paste0("Top ", nrow(significant_genes_df), " Significant Genes")
+)
+
+draw(ht)
+```
